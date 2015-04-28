@@ -1,3 +1,7 @@
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE BangPatterns #-}
+
 -- | Track typing.
 
 module Main where
@@ -5,6 +9,8 @@ module Main where
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Control.Monad.Trans.Resource
+import           Data.ByteString (ByteString)
+import qualified Data.ByteString.Char8 as S8
 import           Data.Conduit
 import qualified Data.Conduit.Binary as CB
 import qualified Data.Conduit.List as CL
@@ -12,26 +18,87 @@ import           Data.Conduit.XInput
 import           Data.Monoid
 import qualified Data.Text as T
 import           Data.Text.Encoding as T
-import           Data.Time.Clock
+import           Data.Time
 import           Formatting
 import           Formatting.Time
+import           Prelude hiding (last)
 import           System.Environment
 import           System.IO
+import           System.Locale
 
+-- | Main dispatcher.
 main :: IO ()
 main =
-  do (device:path:_) <- getArgs
-     runResourceT
-       (void (xinputSource (Device (read device))) $=
-        CL.mapMaybeM
-          (\(event,code) ->
-             do d <- liftIO getCurrentTime
-                let date = formatToString (year <> month <> dayOfMonth <> hour12 <> minute <> second <> pico)
-                                          d
-                return (do guard (event == Press)
-                           key <- lookup code mapping
-                           return (T.encodeUtf8 (T.pack (date ++ " " ++ show key ++ "\n"))))) $$
-        (CB.sinkIOHandle (openFile path AppendMode)))
+  do args <- getArgs
+     case args of
+       ("report":path:_) -> report path
+       (device:path:_) ->
+         startLogging device path
+       _ -> error "Bad arguments"
+
+-- | Start logging keys.
+startLogging :: String -> FilePath -> IO ()
+startLogging device path =
+  runResourceT
+    (void (xinputSource (Device (read device))) $=
+     CL.mapMaybeM
+       (\(event,code) ->
+          do d <- liftIO getCurrentTime
+             let date =
+                   formatToString
+                     (year <> month <> dayOfMonth <> hour12 <> minute <> second <>
+                      pico)
+                     d
+             return (do guard (event == Press)
+                        key <-
+                          lookup code mapping
+                        return (T.encodeUtf8
+                                  (T.pack (date ++ " " ++ show key ++ "\n"))))) $$
+     (CB.sinkIOHandle (openFile path AppendMode)))
+
+-- | Parse a day date.
+parseDay :: ByteString -> Maybe Day
+parseDay (S8.unpack -> (y0:y1:y2:y3:m1:m2:d1:d2:_mm1:_mm2:_s1:_s2:_qs)) =
+  parseTime defaultTimeLocale "%Y-%m-%d" [y0,y1,y2,y3,'-',m1,m2,'-',d1,d2]
+parseDay _ = Nothing
+
+-- | Parse a day date.
+parseDay' :: String -> Maybe Day
+parseDay' (y0:y1:y2:y3:m1:m2:d1:d2:_mm1:_mm2:_s1:_s2:_qs) =
+  parseTime defaultTimeLocale "%Y-%m-%d" [y0,y1,y2,y3,'-',m1,m2,'-',d1,d2]
+parseDay' _ = Nothing
+
+-- | Make a report page.
+report :: FilePath -> IO ()
+report path =
+  do dayCounts <-
+       runResourceT
+         (CB.sourceFile path $= CB.lines $= CL.mapMaybe parseDay $=
+          countGroupBy (==) $$ CL.consume)
+     forM_ dayCounts
+           (\(day,count) ->
+              do fprint (dateDash % ": " % commas % "\n") day count)
+
+-- | Count the elements in each group by the given predicate.
+countGroupBy :: Monad m
+             => (i -> i -> Bool) -> Conduit i m (i,Int)
+countGroupBy cmp = go Nothing
+  where go mlast =
+          do mi <- await
+             case mi of
+               Nothing ->
+                 case mlast of
+                   Nothing -> return ()
+                   Just last ->
+                     yield last
+               Just this ->
+                 case mlast of
+                   Nothing -> go (Just (this,1))
+                   Just (last,!count) ->
+                     if cmp this last
+                        then go (Just (last,count + 1))
+                        else do yield (last,count)
+                                go (Just (this,1))
 
 -- | Key type.
 data Key

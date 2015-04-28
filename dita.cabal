@@ -19,9 +19,10 @@ executable dita
                    , bytestring
                    , conduit
                    , conduit-extra
+                   , formatting
+                   , old-locale >= 1.0.0.6
                    , resourcet
                    , text
                    , time
                    , transformers
                    , xinput-conduit
-                   , formatting
